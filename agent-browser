@@ -1,0 +1,303 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""agent-browser CLI shim for Hermes on Termux.
+
+Wraps browser_playwright.py (Playwright + CDP to local Termux Chromium)
+and presents an agent-browser-compatible CLI interface so Hermes's
+browser_tool.py can invoke us without modification.
+
+Usage (what browser_tool.py calls):
+    agent-browser --engine chrome --session <name> --json open <url>
+    agent-browser --engine chrome --session <name> --json snapshot [-c]
+    agent-browser --engine chrome --session <name> --json click @eN
+    agent-browser --engine chrome --session <name> --json type @eN <text>
+    agent-browser --engine chrome --session <name> --json scroll <up|down>
+    agent-browser --engine chrome --session <name> --json back
+    agent-browser --engine chrome --session <name> --json console <expr>
+    agent-browser --engine chrome --session <name> --json close
+    agent-browser --engine chrome --session <name> --json screenshot [--full]
+
+Output: single-line JSON on stdout (agent-browser format):
+    {"success": true, "data": {"title": "...", "url": "...", "snapshot": "...", "refs": {...}}}
+    {"success": false, "error": "..."}
+"""
+
+import json
+import os
+import sys
+
+# Make browser_playwright importable regardless of cwd.
+# Since 2026-09-09 the toolkit lives in ~/.hermes/browser-tools/ (not ~/workspace):
+# resolve the engine relative to THIS file's directory.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+for _p in (_SCRIPT_DIR,):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+# Refs state persistence path — shared across CLI invocations per session.
+# agent-browser daemon normally keeps refs in-process; since we're stateless
+# CLI invocations, we persist _ref_map and Chromium pid to disk.
+def _state_dir(session: str) -> str:
+    d = os.path.expanduser(f"~/.hermes/run/browser-pw/{session}")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    return d
+
+
+def _refs_path(session: str) -> str:
+    return os.path.join(_state_dir(session), "refs.json")
+
+
+def _load_refs(session: str) -> dict:
+    try:
+        with open(_refs_path(session), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_refs(session: str, refs: dict) -> None:
+    try:
+        with open(_refs_path(session), "w", encoding="utf-8") as f:
+            json.dump(refs, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+# Version string reported for `--version`. Hermes only checks exit code 0,
+# but agent-browser feature gates compare against >= 0.25.3 (e.g. --engine
+# support), so report a version at or above that floor.
+SHIM_VERSION = "0.25.3"
+
+
+def _emit(obj: dict) -> None:
+    """Print single-line JSON to stdout."""
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False))
+    sys.stdout.flush()
+
+
+def main() -> int:
+    # Parse args. We accept and ignore flags we don't use (--engine, --cdp)
+    # but honnour --session (for state isolation).
+    args = sys.argv[1:]
+
+    # --- Hermes probe compatibility -------------------------------------
+    # hermes_constants.agent_browser_runnable() validates every resolved
+    # agent-browser candidate by running `<path> --version` with a 10s
+    # timeout and REJECTS anything that does not exit 0. Without this
+    # branch the shim returned exit 1 ("No command given"), so Hermes
+    # discarded it and fell back to `npx agent-browser` (which is broken
+    # on Termux/arm64). Keep this fast and dependency-free — do NOT import
+    # playwright or spawn Chromium here.
+    if any(a in ("--version", "-V", "-v") for a in args):
+        sys.stdout.write(SHIM_VERSION + "\n")
+        sys.stdout.flush()
+        return 0
+
+    session = "default"
+    json_out = False
+    positional = []
+
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--engine":
+            i += 2  # skip value
+            continue
+        if a == "--session":
+            session = args[i + 1] if i + 1 < len(args) else "default"
+            i += 2
+            continue
+        if a == "--cdp":
+            i += 2  # skip value — we always use our local CDP :9222
+            continue
+        if a == "--json":
+            json_out = True
+            i += 1
+            continue
+        if a.startswith("--"):
+            i += 1  # ignore unknown flags
+            continue
+        positional.append(a)
+        i += 1
+
+    if not positional:
+        _emit({"success": False, "error": "No command given"})
+        return 1
+
+    command = positional[0]
+    cmd_args = positional[1:]
+
+    try:
+        import browser_playwright as bp
+    except Exception as exc:
+        _emit({"success": False, "error": f"browser_playwright import failed: {exc}"})
+        return 1
+
+    # Inject refs from disk into module state before each call so click/type
+    # can resolve refs from a prior snapshot issued by a different process.
+    bp._ref_map = _load_refs(session)
+
+    try:
+        if command == "open":
+            if not cmd_args:
+                _emit({"success": False, "error": "open requires a URL"})
+                return 1
+            url = cmd_args[0]
+            # navigate returns a JSON string
+            raw = bp.browser_navigate(url)
+            result = json.loads(raw)
+            if result.get("success"):
+                # save refs so subsequent click/type (separate process) can resolve
+                _save_refs(session, dict(bp._ref_map))
+                data = {
+                    "title": result.get("title", ""),
+                    "url": result.get("url", url),
+                    "snapshot": result.get("snapshot", ""),
+                    "refs": dict(bp._ref_map),
+                }
+                _emit({"success": True, "data": data})
+            else:
+                _emit(result)
+            return 0
+
+        if command == "snapshot":
+            raw = bp.browser_snapshot()
+            result = json.loads(raw)
+            if result.get("success"):
+                _save_refs(session, dict(bp._ref_map))
+                data = {
+                    "url": result.get("url", ""),
+                    "title": result.get("title", ""),
+                    "snapshot": result.get("snapshot", ""),
+                    "refs": dict(bp._ref_map),
+                }
+                _emit({"success": True, "data": data})
+            else:
+                _emit(result)
+            return 0
+
+        if command == "click":
+            if not cmd_args:
+                _emit({"success": False, "error": "click requires a ref"})
+                return 1
+            ref = cmd_args[0].lstrip("@")
+            raw = bp.browser_click(ref)
+            result = json.loads(raw)
+            if result.get("success"):
+                _save_refs(session, dict(bp._ref_map))
+                data = {
+                    "url": result.get("url", ""),
+                    "snapshot": "",  # optional; could re-snapshot
+                }
+                _emit({"success": True, "data": data})
+            else:
+                _emit(result)
+            return 0
+
+        if command == "type":
+            if len(cmd_args) < 2:
+                _emit({"success": False, "error": "type requires ref and text"})
+                return 1
+            ref = cmd_args[0].lstrip("@")
+            text = cmd_args[1]
+            raw = bp.browser_type(ref, text)
+            result = json.loads(raw)
+            _emit(result)
+            return 0
+
+        if command == "fill":
+            # alias for type
+            if len(cmd_args) < 2:
+                _emit({"success": False, "error": "fill requires ref and text"})
+                return 1
+            ref = cmd_args[0].lstrip("@")
+            text = cmd_args[1]
+            raw = bp.browser_type(ref, text)
+            result = json.loads(raw)
+            _emit(result)
+            return 0
+
+        if command == "scroll":
+            direction = cmd_args[0] if cmd_args else "down"
+            raw = bp.browser_scroll(direction)
+            result = json.loads(raw)
+            _emit(result)
+            return 0
+
+        if command == "back":
+            raw = bp.browser_back()
+            result = json.loads(raw)
+            _emit(result)
+            return 0
+
+        if command == "press":
+            if not cmd_args:
+                _emit({"success": False, "error": "press requires a key"})
+                return 1
+            raw = bp.browser_press(cmd_args[0])
+            result = json.loads(raw)
+            _emit(result)
+            return 0
+
+        if command == "console":
+            # console accepts an expression to evaluate
+            expr = cmd_args[0] if cmd_args else ""
+            raw = bp.browser_console(expression=expr)
+            result = json.loads(raw)
+            _emit(result)
+            return 0
+
+        if command == "eval":
+            # alias — Hermes browser_tool._browser_eval calls "eval <expression>"
+            expr = " ".join(cmd_args) if cmd_args else ""
+            raw = bp.browser_console(expression=expr)
+            result = json.loads(raw)
+            _emit(result)
+            return 0
+
+        if command == "evaluate":
+            # alias
+            expr = " ".join(cmd_args) if cmd_args else ""
+            raw = bp.browser_console(expression=expr)
+            result = json.loads(raw)
+            _emit(result)
+            return 0
+
+        if command == "get_images":
+            raw = bp.browser_get_images()
+            result = json.loads(raw)
+            _emit(result)
+            return 0
+
+        if command == "close":
+            raw = bp.browser_close()
+            result = json.loads(raw)
+            # clear state
+            try:
+                os.unlink(_refs_path(session))
+            except OSError:
+                pass
+            _emit(result)
+            return 0
+
+        if command == "screenshot":
+            full_page = "--full" in cmd_args
+            # Extract output path: last non-flag argument after --full
+            output_path = None
+            for arg in cmd_args:
+                if not arg.startswith("--"):
+                    output_path = arg
+            raw = bp.browser_screenshot(full_page=full_page, output_path=output_path)
+            _emit(json.loads(raw))
+            return 0
+
+        # Unknown command — emit failure so browser_tool.py can see it
+        _emit({"success": False, "error": f"Unknown command: {command}"})
+        return 1
+
+    except Exception as exc:
+        _emit({"success": False, "error": f"{type(exc).__name__}: {exc}"})
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
