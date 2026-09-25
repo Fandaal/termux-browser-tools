@@ -226,7 +226,12 @@ def main() -> int:
         if command == "back":
             raw = bp.browser_back()
             result = json.loads(raw)
-            _emit(result)
+            # Hermes browser_tool.browser_back читает url из response.data —
+            # оборачиваем в data, иначе url теряется даже при успешном переходе.
+            if result.get("success"):
+                _emit({"success": True, "data": {"url": result.get("url", "")}})
+            else:
+                _emit(result)
             return 0
 
         if command == "press":

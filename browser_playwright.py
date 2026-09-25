@@ -684,14 +684,19 @@ def browser_back(task_id: Optional[str] = None) -> str:
     try:
         import json as _j
         page = _connect()
-        # Termux Chromium: go_back(wait_until="domcontentloaded") таймаутит,
-        # хотя переход фактически выполняется. Делаем go_back без ожидания и
-        # подтверждаем результат по фактическому URL страницы.
-        page.go_back()
+        # Termux Chromium: go_back() без wait_until ждёт lifecycle-событие "load",
+        # которое никогда не наступает (дефолтный таймаут Playwright 30s), хотя
+        # сама навигация выполняется ("navigated to ..." в call log). Используем
+        # wait_until="commit" (навигация за commit-фазой) + короткий таймаут:
+        # даже если commit не дождётся, переход уже отправлен — проверяем URL.
         try:
-            page.wait_for_load_state("domcontentloaded", timeout=8000)
+            page.go_back(wait_until="commit", timeout=8000)
         except Exception:
-            pass
+            pass  # навигация могла выполниться несмотря на таймаут — проверим URL
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=3000)
+        except Exception:
+            pass  # domcontentloaded на Termux Chromium тоже может не прийти
         return _j.dumps({"success": True, "url": page.url}, ensure_ascii=False)
     except Exception as exc:
         return _j.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
