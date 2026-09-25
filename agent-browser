@@ -243,7 +243,10 @@ def main() -> int:
             expr = cmd_args[0] if cmd_args else ""
             raw = bp.browser_console(expression=expr)
             result = json.loads(raw)
-            _emit(result)
+            # Hermes читает значение eval из response.data — оборачиваем в data,
+            # иначе browser_console получает result: null.
+            _emit({"success": result.get("success", True),
+                   "data": {"result": result.get("result")}})
             return 0
 
         if command == "eval":
@@ -251,7 +254,8 @@ def main() -> int:
             expr = " ".join(cmd_args) if cmd_args else ""
             raw = bp.browser_console(expression=expr)
             result = json.loads(raw)
-            _emit(result)
+            _emit({"success": result.get("success", True),
+                   "data": {"result": result.get("result")}})
             return 0
 
         if command == "evaluate":
@@ -259,7 +263,8 @@ def main() -> int:
             expr = " ".join(cmd_args) if cmd_args else ""
             raw = bp.browser_console(expression=expr)
             result = json.loads(raw)
-            _emit(result)
+            _emit({"success": result.get("success", True),
+                   "data": {"result": result.get("result")}})
             return 0
 
         if command == "get_images":

@@ -684,9 +684,12 @@ def browser_back(task_id: Optional[str] = None) -> str:
     try:
         import json as _j
         page = _connect()
-        page.go_back(wait_until="domcontentloaded", timeout=10000)
+        # Termux Chromium: go_back(wait_until="domcontentloaded") таймаутит,
+        # хотя переход фактически выполняется. Делаем go_back без ожидания и
+        # подтверждаем результат по фактическому URL страницы.
+        page.go_back()
         try:
-            page.wait_for_load_state("networkidle", timeout=5000)
+            page.wait_for_load_state("domcontentloaded", timeout=8000)
         except Exception:
             pass
         return _j.dumps({"success": True, "url": page.url}, ensure_ascii=False)

@@ -50,6 +50,8 @@ sleep 1
 # --remote-debugging-port=9222 exposes CDP for Playwright connect_over_cdp.
 setsid nohup "$CHROME_BIN" \
   --headless=new \
+  --user-agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36" \
+  --disable-blink-features=AutomationControlled \
   --no-sandbox \
   --disable-gpu \
   --disable-dev-shm-usage \
