@@ -34,7 +34,25 @@ ACTIVITYFILE="$HOME/.hermes/run/browser-pw/last-activity"
 IDLE_TIMEOUT="${BROWSER_IDLE_TIMEOUT:-600}"  # 10 minutes default
 CHROME_BIN="/data/data/com.termux/files/usr/lib/chromium/chrome"
 RUN_DIR="$HOME/.hermes/run/browser-pw"
-mkdir -p "$RUN_DIR"
+# Persistent profile dir (2026-10-01): without an explicit --user-data-dir,
+# headless Chromium creates a throwaway org.chromium.Chromium.scoped_dir.*
+# profile in $PREFIX/tmp (~200MB per launch — the component updater
+# re-downloads TranslateKit/crx_cache/etc. on EVERY launch), and since we only
+# ever kill Chromium with SIGKILL it can never clean up after itself:
+# 478 orphan dirs / 38G accumulated until the disk filled (2026-09-30).
+# A persistent profile stops the leak AND caches components once for all
+# future launches.
+PROFILE_DIR="$RUN_DIR/chrome-profile"
+mkdir -p "$RUN_DIR" "$PROFILE_DIR"
+
+# Self-heal the idle watchdog (2026-10-01). Without the Hermes gateway (its
+# cron ticker is frozen), system crond is the ONLY thing that kills an idle
+# Chromium — if it died after a reboot, a launched browser would sit in RAM
+# for days and re-leak scoped_dir profiles. This is NOT the forbidden `(...)&
+# watchdog fork: it is a synchronous call to an idempotent script that
+# backgrounds crond via setsid+nohup+disown and exits in <=2s, BEFORE
+# Chromium even starts.
+bash "$HOME/.hermes/scripts/browser-watchdog-launcher.sh" >/dev/null 2>&1 || true
 
 # Kill a previous Chromium we launched (exact by PID from disk — no pkill -f).
 OLD_PID=$(cat "$PIDFILE" 2>/dev/null)
@@ -50,6 +68,7 @@ sleep 1
 # --remote-debugging-port=9222 exposes CDP for Playwright connect_over_cdp.
 setsid nohup "$CHROME_BIN" \
   --headless=new \
+  --user-data-dir="$PROFILE_DIR" \
   --user-agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36" \
   --disable-blink-features=AutomationControlled \
   --no-sandbox \
